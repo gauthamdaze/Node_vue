@@ -98,6 +98,141 @@ const defaultEdges: Edge[] = [
   },
 ]
 
+const MAX_NODES = 200
+const MAX_EDGES = 400
+const MAX_LABEL_LENGTH = 120
+const MAX_PAYLOAD_LENGTH = 5000
+const ALLOWED_NODE_TYPES: WorkflowNodeType[] = ['start', 'transform', 'condition', 'end']
+const ALLOWED_TRANSFORMS: TransformConfig['operation'][] = ['uppercase', 'append', 'multiply']
+const ALLOWED_OPERATORS: ConditionConfig['operator'][] = ['equals', 'contains', 'greater', 'less', 'exists']
+
+const DEFAULT_LABELS: Record<WorkflowNodeType, string> = {
+  start: 'Start',
+  transform: 'Transform',
+  condition: 'If / Else',
+  end: 'End',
+}
+
+function typeLabel(type: WorkflowNodeType) {
+  return DEFAULT_LABELS[type] ?? 'Node'
+}
+
+function sanitizeLabel(label: unknown, fallback: string) {
+  if (typeof label !== 'string') return fallback
+  const trimmed = label.trim()
+  return trimmed ? trimmed.slice(0, MAX_LABEL_LENGTH) : fallback
+}
+
+function sanitizePosition(position: unknown): XYPosition {
+  const x = Number((position as any)?.x)
+  const y = Number((position as any)?.y)
+  if (Number.isFinite(x) && Number.isFinite(y)) return { x, y }
+  return { x: 0, y: 0 }
+}
+
+function sanitizeStartConfig(config: unknown): StartConfig {
+  const payload =
+    typeof (config as any)?.payload === 'string'
+      ? (config as any).payload.slice(0, MAX_PAYLOAD_LENGTH)
+      : '{"message":"hello"}'
+  return { payload }
+}
+
+function sanitizeTransformConfig(config: unknown): TransformConfig {
+  const cfg = (config ?? {}) as Record<string, unknown>
+  const operation = ALLOWED_TRANSFORMS.includes(cfg.operation as TransformConfig['operation'])
+    ? (cfg.operation as TransformConfig['operation'])
+    : 'uppercase'
+  const field =
+    typeof cfg.field === 'string' && cfg.field.trim()
+      ? cfg.field.trim().slice(0, 64)
+      : 'message'
+  const appendText =
+    typeof cfg.appendText === 'string' ? (cfg.appendText as string).slice(0, 200) : undefined
+  const factor =
+    Number.isFinite(cfg.factor) && typeof cfg.factor === 'number'
+      ? (cfg.factor as number)
+      : undefined
+  return { operation, field, appendText, factor }
+}
+
+function sanitizeConditionConfig(config: unknown): ConditionConfig {
+  const cfg = (config ?? {}) as Record<string, unknown>
+  const field =
+    typeof cfg.field === 'string' && cfg.field.trim()
+      ? cfg.field.trim().slice(0, 64)
+      : 'field'
+  const operator = ALLOWED_OPERATORS.includes(cfg.operator as ConditionConfig['operator'])
+    ? (cfg.operator as ConditionConfig['operator'])
+    : 'equals'
+  const value =
+    cfg.value !== undefined && cfg.value !== null ? String(cfg.value).slice(0, 200) : undefined
+  return { field, operator, value }
+}
+
+function sanitizeConfig(type: WorkflowNodeType, config: unknown) {
+  if (type === 'start') return sanitizeStartConfig(config)
+  if (type === 'transform') return sanitizeTransformConfig(config)
+  if (type === 'condition') return sanitizeConditionConfig(config)
+  return {}
+}
+
+function validateNode(raw: unknown): FlowNode | null {
+  if (!raw || typeof raw !== 'object') return null
+  const id = typeof (raw as any).id === 'string' ? (raw as any).id.slice(0, 64) : null
+  if (!id) return null
+
+  const data = (raw as any).data ?? {}
+  const type = (data as any).type as WorkflowNodeType
+  if (!ALLOWED_NODE_TYPES.includes(type)) return null
+
+  const label = sanitizeLabel((data as any).label, typeLabel(type))
+  const position = sanitizePosition((raw as any).position)
+  const config = sanitizeConfig(type, (data as any).config)
+
+  return {
+    id,
+    type: 'appNode',
+    position,
+    data: {
+      type,
+      label,
+      config,
+    },
+  }
+}
+
+function validateEdge(raw: unknown, nodeIds: Set<string>): Edge | null {
+  if (!raw || typeof raw !== 'object') return null
+  const id = typeof (raw as any).id === 'string' ? (raw as any).id.slice(0, 64) : null
+  const source =
+    typeof (raw as any).source === 'string' && nodeIds.has((raw as any).source)
+      ? ((raw as any).source as string)
+      : null
+  const target =
+    typeof (raw as any).target === 'string' && nodeIds.has((raw as any).target)
+      ? ((raw as any).target as string)
+      : null
+  if (!id || !source || !target) return null
+
+  const label =
+    typeof (raw as any).label === 'string' ? ((raw as any).label as string).slice(0, 60) : undefined
+  const sourceHandle =
+    typeof (raw as any).sourceHandle === 'string' ? ((raw as any).sourceHandle as string) : undefined
+  const targetHandle =
+    typeof (raw as any).targetHandle === 'string' ? ((raw as any).targetHandle as string) : undefined
+
+  return {
+    id,
+    source,
+    target,
+    label,
+    sourceHandle,
+    targetHandle,
+    animated: Boolean((raw as any).animated),
+  }
+}
+
 export const useWorkflowStore = defineStore('workflow', () => {
   const nodes = ref<FlowNode[]>([...defaultNodes])
   const edges = ref<Edge[]>([...defaultEdges])
@@ -148,21 +283,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
     }
     nodes.value = [...nodes.value, node]
     selectedNodeId.value = id
-  }
-
-  function typeLabel(type: WorkflowNodeType) {
-    switch (type) {
-      case 'start':
-        return 'Start'
-      case 'transform':
-        return 'Transform'
-      case 'condition':
-        return 'If / Else'
-      case 'end':
-        return 'End'
-      default:
-        return 'Node'
-    }
   }
 
   function updateNodePosition(id: string, position: XYPosition) {
@@ -217,9 +337,28 @@ export const useWorkflowStore = defineStore('workflow', () => {
   function importState(json: string) {
     try {
       const parsed = JSON.parse(json) as WorkflowSnapshot
-      if (!parsed.nodes || !parsed.edges) throw new Error('Invalid workflow file')
-      nodes.value = parsed.nodes
-      edges.value = parsed.edges
+      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges))
+        throw new Error('Invalid workflow file')
+
+      if (parsed.nodes.length > MAX_NODES) throw new Error('Too many nodes in workflow file')
+      if (parsed.edges.length > MAX_EDGES) throw new Error('Too many edges in workflow file')
+
+      const sanitizedNodes: FlowNode[] = []
+      for (const raw of parsed.nodes) {
+        const node = validateNode(raw)
+        if (node) sanitizedNodes.push(node)
+      }
+      if (!sanitizedNodes.length) throw new Error('No valid nodes found in workflow file')
+
+      const nodeIds = new Set(sanitizedNodes.map((node) => node.id))
+      const sanitizedEdges: Edge[] = []
+      for (const raw of parsed.edges) {
+        const edge = validateEdge(raw, nodeIds)
+        if (edge) sanitizedEdges.push(edge)
+      }
+
+      nodes.value = sanitizedNodes
+      edges.value = sanitizedEdges
       selectedNodeId.value = null
       logs.value = []
     } catch (error) {

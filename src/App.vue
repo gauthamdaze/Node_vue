@@ -23,6 +23,7 @@ const nodeTypes = { appNode: BaseNode }
 const importInput = ref<HTMLInputElement | null>(null)
 const importError = ref('')
 const { selectedNode } = storeToRefs(store)
+const MAX_IMPORT_BYTES = 512 * 1024 // 512 KB safety cap for uploads
 
 const palette = [
   {
@@ -155,6 +156,16 @@ async function handleImport(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
   if (!file) return
+  if (file.type && file.type !== 'application/json') {
+    importError.value = 'Only JSON files are allowed.'
+    target.value = ''
+    return
+  }
+  if (file.size > MAX_IMPORT_BYTES) {
+    importError.value = 'File is too large. Max size is 512 KB.'
+    target.value = ''
+    return
+  }
   try {
     const text = await file.text()
     store.importState(text)
