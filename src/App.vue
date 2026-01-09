@@ -178,7 +178,7 @@ function clearFlow() {
       <div class="brand">
         <div class="brand__dot" />
         <div>
-          <div class="brand__title">Flow Builder</div>
+          <div class="brand__title">Gautham's Flow Builder</div>
           <p class="brand__subtitle">Drag, connect, configure, and run</p>
         </div>
       </div>
